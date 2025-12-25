@@ -62,9 +62,10 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
         l_i_j = m_temp * l_i_pre + tl.sum(P_i_j, dim=1)
 
         # b_q b_k, b_k d_model -> b_q d_model
-        P_V = tl.dot(P_i_j, V_j)
+        P_V = tl.dot(P_i_j.to(V_j.dtype), V_j)
         # generate diag in triton : "b_q b_q"
         m_temp_diag = tl.where(offs_m[:, None] == offs_n[None, :], m_temp[:, None], 0.0)
+        m_temp_diag = m_temp_diag.to(O_i_pre.dtype)
 
         # b_q b_q, b_q d_model -> b_q d_model
         O_i_j = tl.dot(m_temp_diag, O_i_pre)
@@ -82,6 +83,7 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
     l_i_pre_rev = 1.0 / l_i_pre
     # "b_q b_q"
     diag_temp = tl.where(offs_m[:, None] == offs_n[None, :], l_i_pre_rev[:, None], 0.0)
+    diag_temp = diag_temp.to(O_i_pre.dtype)
 
     # b_q b_q, b_q d_model -> b_q d_model
     O_i = tl.dot(diag_temp, O_i_pre)
