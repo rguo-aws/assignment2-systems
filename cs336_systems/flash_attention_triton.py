@@ -12,12 +12,12 @@ from einops import einsum, rearrange
 def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, stride_qd, stride_kb, stride_kk,
                      stride_kd, stride_vb, stride_vk, stride_vd, stride_ob, stride_oq, stride_od, stride_lb, stride_lq,
                      N_QUERIES, N_KEYS, scale, D: tl.constexpr, Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr,
-                     is_casual = False):
+                     is_causal = False):
     # Program indices
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
 
-    EPS = 1e-6
+    EPS = -1e6
 
     # multiplied with the batch stride for each tensor
     Q_block_ptr = tl.make_block_ptr(Q_ptr + batch_index * stride_qb, shape=(N_QUERIES, D),
@@ -49,20 +49,23 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
     offs_m = tl.arange(0, Q_TILE_SIZE)
     offs_n = tl.arange(0, Q_TILE_SIZE)
 
-    offs_k = tl.arange(0, K_TILE_SIZE)
-
     Q_i = tl.load(Q_block_ptr, boundary_check=(0, 1), padding_option="zero")
     for j in range(t_k):
         K_j = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
         V_j = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-        # b_q d_model, b_k d_model -> b_q b_k
+        # n_q d_model, n_k d_model -> n_q n_k
         S_i_j = tl.dot(Q_i, tl.trans(K_j))
         S_i_j = S_i_j * scale
 
         # All attention to future tokens (j > i) is masked out
-        if is_casual:
-            S_i_j = tl.where(offs_m[:, None] <= offs_k[None, :], S_i_j[:, :], EPS)
+        if is_causal:
+            offs_1 = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            offs_2 = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            #  X X X
+            #  0 X X
+            #  0 0 X
+            S_i_j = tl.where(offs_1[:, None] < offs_2[None, :], EPS, S_i_j[:, :])
 
         m_i_j = tl.max(S_i_j, axis=1)
         m_i_j = tl.maximum(m_i_pre, m_i_j)
