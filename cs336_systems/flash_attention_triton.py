@@ -22,11 +22,11 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
                                     block_shape=(Q_TILE_SIZE, D), order=(1, 0), )
 
     K_block_ptr = tl.make_block_ptr(K_ptr + batch_index * stride_kb, shape=(N_KEYS, D),
-                                    strides=(stride_kk, stride_kd), offsets=(query_tile_index * K_TILE_SIZE, 0),
+                                    strides=(stride_kk, stride_kd), offsets=(0, 0),
                                     block_shape=(K_TILE_SIZE, D), order=(1, 0), )
 
     V_block_ptr = tl.make_block_ptr(V_ptr + batch_index * stride_vb, shape=(N_KEYS, D),
-                                    strides=(stride_vk, stride_vd), offsets=(query_tile_index * K_TILE_SIZE, 0),
+                                    strides=(stride_vk, stride_vd), offsets=(0, 0),
                                     block_shape=(K_TILE_SIZE, D), order=(1, 0), )
 
     O_block_ptr = tl.make_block_ptr(O_ptr + batch_index * stride_ob, shape=(N_QUERIES, D),
@@ -53,13 +53,13 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
 
         # b_q d_model, b_k d_model -> b_q b_k
         S_i_j = tl.dot(Q_i, tl.trans(K_j))
-        S_i_j = S_i_j / scale
-        m_i_j = tl.max(S_i_j, dim=1).values
+        S_i_j = S_i_j * scale
+        m_i_j = tl.max(S_i_j, axis=1)
         m_i_j = tl.maximum(m_i_pre, m_i_j)
 
         P_i_j = tl.exp(S_i_j - m_i_j[:, None])
         m_temp = tl.exp(m_i_pre - m_i_j)
-        l_i_j = m_temp * l_i_pre + tl.sum(P_i_j, dim=1)
+        l_i_j = m_temp * l_i_pre + tl.sum(P_i_j, axis=1)
 
         # b_q b_k, b_k d_model -> b_q d_model
         P_V = tl.dot(P_i_j.to(V_j.dtype), V_j)
@@ -77,8 +77,8 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
         m_i_pre = m_i_j
 
         # forward ptr
-        K_block_ptr = K_block_ptr.advance((0, K_TILE_SIZE))
-        V_block_ptr = V_block_ptr.advance((0, K_TILE_SIZE))
+        K_block_ptr = K_block_ptr.advance((K_TILE_SIZE, 0))
+        V_block_ptr = V_block_ptr.advance((K_TILE_SIZE, 0))
 
     l_i_pre_rev = 1.0 / l_i_pre
     # "b_q b_q"
@@ -112,9 +112,9 @@ class FlashAttentionTriton(autograd.Function):
         # k_transformed = rearrange(k, "B n_k D -> (B n_k) D")
         # v_transformed = rearrange(v, "B n_k D -> (B n_k) D")
 
-        O = torch.zeros(B, n_q, D)
+        O = torch.zeros((B, n_q, D), device="cuda")
         # O_transformed = rearrange(O, "B n_q D -> (B n_q) D")
-        L = torch.zeros(B, n_q, )
+        L = torch.zeros((B, n_q, ), device="cuda")
         # L_transformed = rearrange(L, "B n_q -> (B n_q)")
 
         flash_fwd_kernel[(t_q, B,)](Q_ptr=q,
@@ -127,7 +127,7 @@ class FlashAttentionTriton(autograd.Function):
                                     stride_vb=v.stride(0), stride_vk=v.stride(1), stride_vd=v.stride(2),
                                     stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
                                     stride_lb=L.stride(0), stride_lq=L.stride(1),
-                                    N_QUERIES=n_q, N_KEYS=n_k, scale=D ** 0.5,
+                                    N_QUERIES=n_q, N_KEYS=n_k, scale=1.0 / (D ** 0.5),
                                     D=D, Q_TILE_SIZE=FlashAttentionTriton.b_q, K_TILE_SIZE=FlashAttentionTriton.b_k)
 
         ctx.save_for_backward(q, k, v, L)
