@@ -11,10 +11,13 @@ from einops import einsum, rearrange
 @triton.jit
 def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, stride_qd, stride_kb, stride_kk,
                      stride_kd, stride_vb, stride_vk, stride_vd, stride_ob, stride_oq, stride_od, stride_lb, stride_lq,
-                     N_QUERIES, N_KEYS, scale, D: tl.constexpr, Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr):
+                     N_QUERIES, N_KEYS, scale, D: tl.constexpr, Q_TILE_SIZE: tl.constexpr, K_TILE_SIZE: tl.constexpr,
+                     is_causal = False):
     # Program indices
     query_tile_index = tl.program_id(0)
     batch_index = tl.program_id(1)
+
+    EPS = -1e6
 
     # multiplied with the batch stride for each tensor
     Q_block_ptr = tl.make_block_ptr(Q_ptr + batch_index * stride_qb, shape=(N_QUERIES, D),
@@ -51,9 +54,19 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
         K_j = tl.load(K_block_ptr, boundary_check=(0, 1), padding_option="zero")
         V_j = tl.load(V_block_ptr, boundary_check=(0, 1), padding_option="zero")
 
-        # b_q d_model, b_k d_model -> b_q b_k
+        # n_q d_model, n_k d_model -> n_q n_k
         S_i_j = tl.dot(Q_i, tl.trans(K_j))
         S_i_j = S_i_j * scale
+
+        # All attention to future tokens (j > i) is masked out
+        if is_causal:
+            offs_1 = query_tile_index * Q_TILE_SIZE + tl.arange(0, Q_TILE_SIZE)
+            offs_2 = j * K_TILE_SIZE + tl.arange(0, K_TILE_SIZE)
+            #  X X X
+            #  0 X X
+            #  0 0 X
+            S_i_j = tl.where(offs_1[:, None] < offs_2[None, :], EPS, S_i_j[:, :])
+
         m_i_j = tl.max(S_i_j, axis=1)
         m_i_j = tl.maximum(m_i_pre, m_i_j)
 
@@ -106,6 +119,8 @@ class FlashAttentionTriton(autograd.Function):
         assert B_q == B_k
         B = B_q
 
+        ctx.is_causal = is_causal
+
         t_q: int = n_q // FlashAttentionTriton.b_q
 
         # q_transformed = rearrange(q, "B n_q D -> (B n_q) D")
@@ -128,7 +143,8 @@ class FlashAttentionTriton(autograd.Function):
                                     stride_ob=O.stride(0), stride_oq=O.stride(1), stride_od=O.stride(2),
                                     stride_lb=L.stride(0), stride_lq=L.stride(1),
                                     N_QUERIES=n_q, N_KEYS=n_k, scale=1.0 / (D ** 0.5),
-                                    D=D, Q_TILE_SIZE=FlashAttentionTriton.b_q, K_TILE_SIZE=FlashAttentionTriton.b_k)
+                                    D=D, Q_TILE_SIZE=FlashAttentionTriton.b_q, K_TILE_SIZE=FlashAttentionTriton.b_k,
+                                    is_causal = is_causal)
 
         ctx.save_for_backward(q, k, v, L)
         return O
