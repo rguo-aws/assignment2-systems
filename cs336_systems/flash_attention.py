@@ -76,6 +76,7 @@ class FlashAttentionPytorch(autograd.Function):
         O = rearrange(O_transformed, "(B n_q) D -> B n_q D", B = B, n_q = n_q, D = D)
         L = rearrange(L_transformed, "(B n_q) -> B n_q", B=B, n_q=n_q)
         ctx.save_for_backward(q, k, v, L)
+        ctx.is_causal = is_causal
 
         return O
 
