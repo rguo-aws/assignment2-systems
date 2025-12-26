@@ -113,7 +113,7 @@ def flash_backward_kernel(q, k, v, L, dO, scale, is_causal = False):
 
     if is_causal:
         _, n_q, n_k = S.shape
-        mask = torch.triu(
+        mask = torch.tril(
             torch.ones(n_q, n_k, device=q.device, dtype=torch.bool),
             diagonal=0
         )
@@ -182,6 +182,7 @@ class FlashAttentionTriton(autograd.Function):
     @staticmethod
     def backward(ctx, grad_output, is_causal=False):
         q, k, v, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
         B_q, n_q, D = q.shape
         B_k, n_k, D = k.shape
 
