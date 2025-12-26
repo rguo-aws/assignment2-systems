@@ -87,4 +87,39 @@ class FlashAttentionPytorch(autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        raise NotImplementedError
+        q, k, v, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+
+        B_q, n_q, d_model = q.shape
+        B_k, n_k, d_model = k.shape
+
+        scale = 1.0 / (d_model ** 0.5)
+
+        dO = grad_output
+        S = einsum(q, k, "B n_q d_model, B n_k d_model -> B n_q n_k")
+        S = S * scale
+
+        if is_causal:
+            _, n_q, n_k = S.shape
+            mask = torch.tril(
+                torch.ones(n_q, n_k, device=q.device, dtype=torch.bool),
+                diagonal=0
+            )
+            S.masked_fill(~mask, -1e6)
+
+        P_i_j = torch.exp(S - L.unsqueeze(-1))
+        dV = einsum(P_i_j, dO, "B n_q n_k, B n_q d_model -> B n_k d_model")
+        dP = einsum(dO, v, "B n_q d_model, B n_k d_model -> B n_q n_k")
+
+        D = P_i_j * dP
+        # B n_q
+        D = torch.sum(D, dim=-1)
+        dS_i_j = P_i_j * (dP - D.unsqueeze(-1))
+
+        dQ = einsum(dS_i_j, k, "B n_q n_k, B n_k d_model -> B n_q d_model")
+        dQ = dQ * scale
+
+        dK = einsum(dS_i_j, q, "B n_q n_k, B n_q d_model -> B n_k d_model")
+        dK = dK * scale
+
+        return dQ, dK, dV, None
