@@ -106,6 +106,36 @@ def flash_fwd_kernel(Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, stride_qb, stride_qq, st
     tl.store(O_block_ptr, O_i, boundary_check=(0, 1))
     tl.store(L_block_ptr, L_i, boundary_check=(0,))
 
+@torch.compile
+def flash_backward_kernel(q, k, v, L, dO, scale, is_causal = False):
+    S = einsum(q, k, "B n_q d_model, B n_k d_model -> B n_q n_k")
+    S = S * scale
+
+    if is_causal:
+        _, n_q, n_k = S.shape
+        mask = torch.tril(
+            torch.ones(n_q, n_k, device=q.device, dtype=torch.bool),
+            diagonal=0
+        )
+        S.masked_fill(~mask, -1e6)
+
+    P_i_j = torch.exp(S - L.unsqueeze(-1))
+    dV = einsum(P_i_j, dO, "B n_q n_k, B n_q d_model -> B n_k d_model")
+    dP = einsum(dO, v, "B n_q d_model, B n_k d_model -> B n_q n_k")
+
+    D = P_i_j * dP
+    # B n_q
+    D = torch.sum(D, dim=-1)
+    dS_i_j = P_i_j * (dP - D.unsqueeze(-1))
+
+    dQ = einsum(dS_i_j, k, "B n_q n_k, B n_k d_model -> B n_q d_model")
+    dQ = dQ * scale
+
+    dK = einsum(dS_i_j, q, "B n_q n_k, B n_q d_model -> B n_k d_model")
+    dK = dK * scale
+    return dQ, dK, dV
+
+
 
 class FlashAttentionTriton(autograd.Function):
     b_q: int = 32
@@ -150,5 +180,13 @@ class FlashAttentionTriton(autograd.Function):
         return O
 
     @staticmethod
-    def backward(ctx, grad_output):
-        raise NotImplementedError
+    def backward(ctx, grad_output, is_causal=False):
+        q, k, v, L = ctx.saved_tensors
+        is_causal = ctx.is_causal
+        B_q, n_q, D = q.shape
+        B_k, n_k, D = k.shape
+
+        scale = 1.0 / (D ** 0.5)
+
+        dQ, dK, dV = flash_backward_kernel(q, k, v, L, grad_output, scale, is_causal)
+        return dQ, dK, dV, None
