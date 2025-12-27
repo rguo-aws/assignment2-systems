@@ -108,6 +108,75 @@ def naive_dpp_worker(rank, world_size, model_config, num_steps, run_benchmark = 
             print(f"Proportion of time spent on communication: {comm_proportion:.2f}%")
 
 
+def flat_dpp_worker(rank, world_size, model_config, num_steps, run_benchmark = False):
+    WARMUP = 5
+
+    device = setup(rank, world_size)
+    torch.manual_seed(42)
+    model = BasicsTransformerLM(**model_config).to(device)
+    optimizer = AdamW(model.parameters())
+
+    assert num_steps > WARMUP, f"warm up step = {WARMUP} so num_steps should be > {WARMUP}"
+
+    total_times = []
+    comm_times = []
+
+    for step in range(num_steps):
+        full_batch = torch.randint(0, model_config['vocab_size'], (world_size * 4, model_config['context_length']), device=device)
+        local_batch = full_batch[rank * 4: (rank + 1) * 4]
+
+        if run_benchmark:
+            torch.cuda.synchronize()
+            total_start_time = timeit.default_timer()
+
+        optimizer.zero_grad()
+        outputs = model(local_batch)
+        loss = outputs.sum()
+        loss.backward()
+
+        all_grads = [p.grad.data for p in model.parameters() if p.grad is not None]
+        flat_grad = torch._utils._flatten_dense_tensors(all_grads)
+
+        if run_benchmark:
+            torch.cuda.synchronize()
+            comm_start_time = timeit.default_timer()
+
+        # dpp to sync flat
+        dist.all_reduce(flat_grad.data, op=dist.ReduceOp.SUM)
+        flat_grad.data /= world_size
+
+        if run_benchmark:
+            torch.cuda.synchronize()
+            comm_end_time = timeit.default_timer()
+            comm_times.append(comm_end_time - comm_start_time)
+
+        synced_grads = torch._utils._unflatten_dense_tensors(flat_grad, all_grads)
+
+        # Copy the synced gradients back to the original parameters
+        for p, g in zip(all_grads, synced_grads):
+            p.grad.copy_(g)
+
+        optimizer.step()
+
+        if run_benchmark:
+            torch.cuda.synchronize()
+            step_end_time = timeit.default_timer()
+            total_times.append(step_end_time - total_start_time)
+
+    if rank == 0:
+        torch.save(model.state_dict(), "model.pt")
+
+        if run_benchmark:
+            total_times = total_times[WARMUP:]
+            comm_times = comm_times[WARMUP:]
+            avg_total_time = np.mean(total_times) * 1000
+            avg_comm_time = np.mean(comm_times) * 1000
+            comm_proportion = (avg_comm_time / avg_total_time) * 100
+
+            print(f"Average total time per step: {avg_total_time:.2f} ms")
+            print(f"Average communication time per step: {avg_comm_time:.2f} ms")
+            print(f"Proportion of time spent on communication: {comm_proportion:.2f}%")
+
 def compare_toy_result_main():
     model_config = {
         "vocab_size": 128,
@@ -149,10 +218,26 @@ def naive_dpp_benchmark():
         "rope_theta": 10000.0
     }
 
-    world_size = 4
+    # 2 gpu pod
+    world_size = 2
     num_steps = 10
     mp.spawn(fn=naive_dpp_worker, args=(world_size, model_config, num_steps, True), nprocs=world_size, join=True)
 
+def flat_dpp_benchmark():
+    model_config = {
+        "vocab_size": 128,
+        "d_model": 64,
+        "d_ff": 128,
+        "num_layers": 3,
+        "num_heads": 4,
+        "context_length": 128,
+        "rope_theta": 10000.0
+    }
+
+    # 2 gpu pod
+    world_size = 2
+    num_steps = 10
+    mp.spawn(fn=flat_dpp_worker, args=(world_size, model_config, num_steps, True), nprocs=world_size, join=True)
 
 if __name__ == "__main__":
     #compare_toy_result_main()
