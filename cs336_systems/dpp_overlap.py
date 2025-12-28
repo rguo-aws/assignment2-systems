@@ -8,14 +8,20 @@ import torch.multiprocessing as mp
 def _grad_hook(handle):
     handle.wait()
 
-class DDPIndividualParameters:
+class DDPIndividualParameters(torch.nn.Module):
     def __init__(self, module: torch.nn.Module):
-        self.model = module
+        super(DDPIndividualParameters, self).__init__()
+        self.module = module
         self.world_size = dist.get_world_size()
         self.handles = []
 
+        for p in self.module.parameters():
+            dist.broadcast(p.data, src=0)
+            if p.grad is not None:
+                p.grad.register_post_accumulate_grad_hook(self._create_hook())
+
     def forward(self, *inputs, **kwargs):
-        self.model.forward(*inputs, **kwargs)
+        self.module.forward(*inputs, **kwargs)
 
     def _create_hook(self):
         def hook(param):
@@ -25,16 +31,13 @@ class DDPIndividualParameters:
         return hook
 
     def finish_gradient_synchronization(self):
-        grads = [p.grad.data for p in self.model.parameters() if p.grad is not None]
-
-        for grad in grads:
-            grad.register_post_accumulate_grad_hook(self._create_hook())
-
         for handle in self.handles:
             handle.wait()
 
-        for p in grads:
-            p.data /= self.world_size
         self.handles.clear()
+
+        for p in self.module.parameters():
+            if p.grad is not None:
+                p.grad.data /= self.world_size
 
 
