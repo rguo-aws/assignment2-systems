@@ -154,7 +154,7 @@ def flat_dpp_worker(rank, world_size, model_config, num_steps, run_benchmark = F
 
         # Copy the synced gradients back to the original parameters
         for p, g in zip(all_grads, synced_grads):
-            p.grad.copy_(g)
+            p.copy_(g)
 
         optimizer.step()
 
