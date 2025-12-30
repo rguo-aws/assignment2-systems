@@ -1,7 +1,7 @@
 from typing import AnyStr, Any
 
 import torch
-from attr import dataclass
+import dataclasses
 from torch.nn import Module
 
 import torch.distributed as dist
@@ -41,7 +41,7 @@ class DDPIndividualParameters(torch.nn.Module):
             if p.requires_grad:
                 p.grad.data /= self.world_size
 
-@dataclass
+@dataclasses.dataclass
 class Bucket:
     size: float
     grads: list[torch.Tensor]
@@ -70,14 +70,14 @@ class DDPBucketed(torch.nn.Module):
         def hook(param):
             grad_size_mb = (param.grad.numel() * param.grad.element_size()) / (1024 * 1024)
             if len(self.buckets) == 0:
-                self.buckets.append(Bucket(grad_size_mb, [param.grad], None, None))
+                self.buckets.append(Bucket(size = grad_size_mb, grads = [param.grad]))
             elif self.buckets[-1].size + grad_size_mb <= self.bucket_size_mb:
                 self.buckets[-1].size += grad_size_mb
                 self.buckets[-1].grads.append(param.grad)
             else:
                 self.buckets[-1].flat_grad = torch._utils._flatten_dense_tensors(self.buckets[-1].grads)
                 #self.buckets[-1].grads.clear()
-                self.buckets.append(Bucket(grad_size_mb, [param.grad], None, None))
+                self.buckets.append(Bucket(size = grad_size_mb, grads = [param.grad]))
         return hook
 
     def finish_gradient_synchronization(self):
