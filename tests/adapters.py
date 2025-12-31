@@ -5,8 +5,9 @@ from typing import Type
 import torch
 
 from cs336_systems.flash_attention import FlashAttentionPytorch
-from cs336_systems.flash_attention_triton import FlashAttentionTriton
+#from cs336_systems.flash_attention_triton import FlashAttentionTriton
 from cs336_systems.dpp_overlap import DDPIndividualParameters, DDPBucketed
+from cs336_systems.optimizer_sharding import ShardedOptimizer
 
 def get_flashattention_autograd_function_pytorch() -> Type:
     """
@@ -138,4 +139,5 @@ def get_sharded_optimizer(params, optimizer_cls: Type[torch.optim.Optimizer], **
     Returns:
         Instance of sharded optimizer.
     """
-    raise NotImplementedError
+    print(params)
+    return ShardedOptimizer(params, optimizer_cls, **kwargs)
